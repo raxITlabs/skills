@@ -134,10 +134,14 @@ def auto_install(available: dict[str, bool], quiet: bool = False) -> dict[str, b
         cmd_name = " ".join(pip_cmd)
         if not quiet:
             print(f"  {cmd_name} {' '.join(missing_pip)}")
-        subprocess.run(
+        result = subprocess.run(
             [*pip_cmd, "-q", *missing_pip],
             capture_output=quiet, timeout=180,
         )
+        if result.returncode != 0 and not quiet:
+            # Retry without -q to show errors
+            print("  Retrying with verbose output...")
+            subprocess.run([*pip_cmd, *missing_pip], timeout=180)
 
     if missing_npm and shutil.which("npm"):
         if not quiet:
