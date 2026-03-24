@@ -58,12 +58,18 @@ class ScannerResult:
 
 SAFE_EXTENSIONS = {".safetensors", ".gguf", ".onnx"}
 
-SCANNABLE_EXTENSIONS = {
-    ".pkl", ".pickle", ".pt", ".pth", ".bin", ".joblib",
-    ".npy", ".h5", ".keras", ".pb",
-    ".safetensors", ".onnx",
-    ".json", ".yaml", ".yml",
-}
+# Pickle-based formats — run pickle scanners (fickling, modelscan, picklescan)
+PICKLE_EXTENSIONS = {".pkl", ".pickle", ".pt", ".pth", ".bin", ".joblib"}
+
+# Non-pickle model formats — only modelscan or modelaudit can handle these
+NONPICKLE_MODEL_EXTENSIONS = {".npy", ".h5", ".keras", ".pb"}
+
+# Config files — only modelaudit checks these (trust_remote_code, auto_map)
+CONFIG_EXTENSIONS = {".json", ".yaml", ".yml"}
+
+SCANNABLE_EXTENSIONS = (
+    PICKLE_EXTENSIONS | NONPICKLE_MODEL_EXTENSIONS | SAFE_EXTENSIONS | CONFIG_EXTENSIONS
+)
 
 HF_SKIP_PATTERNS = {
     "tokenizer*", "vocab*", "merges*", "special_tokens*",
@@ -378,9 +384,18 @@ SCANNER_RUNNERS = {
 
 
 def aggregate_verdict(results: list[ScannerResult]) -> Verdict:
-    active = [r for r in results if r.available and r.verdict != Verdict.ERROR]
+    # Only consider scanners that actually ran (not skipped, not errored, not unavailable)
+    ran = [r for r in results if r.available and r.verdict not in (Verdict.ERROR,)]
+    # Filter out scanners that were skipped (marked SAFE with "Not applicable" detail)
+    active = [r for r in ran if not any("Not applicable" in d for d in r.details)]
+
     if not active:
+        # All scanners were skipped or errored — check if format-safe
+        format_safe = [r for r in ran if r.verdict == Verdict.FORMAT_SAFE]
+        if format_safe:
+            return Verdict.FORMAT_SAFE
         return Verdict.ERROR
+
     verdicts = [r.verdict for r in active]
     if Verdict.MALICIOUS in verdicts:
         return Verdict.MALICIOUS
@@ -391,30 +406,82 @@ def aggregate_verdict(results: list[ScannerResult]) -> Verdict:
     return Verdict.SAFE
 
 
+def get_scanners_for_format(ext: str) -> dict[str, str]:
+    """
+    Route files to the right scanners based on format.
+    This prevents false positives from running pickle scanners on JSON/NPY/etc.
+
+    Returns dict of scanner_name -> reason it applies (or is skipped).
+    """
+    ext = ext.lower()
+
+    if ext in SAFE_EXTENSIONS:
+        # SafeTensors/ONNX/GGUF — non-executable, only check for config issues
+        return {
+            "fickling": "skip",      # not applicable
+            "modelscan": "skip",     # not applicable
+            "picklescan": "skip",    # not applicable
+            "modelaudit": "run",     # checks for embedded issues
+        }
+
+    if ext in PICKLE_EXTENSIONS:
+        # Pickle-based — run all pickle scanners
+        return {
+            "fickling": "run",
+            "modelscan": "run",
+            "picklescan": "run",
+            "modelaudit": "run",
+        }
+
+    if ext in NONPICKLE_MODEL_EXTENSIONS:
+        # NPY, H5, Keras, TF — only modelscan and modelaudit handle these
+        return {
+            "fickling": "skip",
+            "modelscan": "run",
+            "picklescan": "skip",
+            "modelaudit": "run",
+        }
+
+    if ext in CONFIG_EXTENSIONS:
+        # JSON/YAML configs — only modelaudit checks for trust_remote_code/auto_map
+        return {
+            "fickling": "skip",
+            "modelscan": "skip",
+            "picklescan": "skip",
+            "modelaudit": "run",
+        }
+
+    # Unknown format — try modelaudit only (widest format support)
+    return {
+        "fickling": "skip",
+        "modelscan": "skip",
+        "picklescan": "skip",
+        "modelaudit": "run",
+    }
+
+
 def scan_file(path: Path, available: dict[str, bool], verbose: bool) -> tuple[list[ScannerResult], Verdict]:
     ext = path.suffix.lower()
+    routing = get_scanners_for_format(ext)
 
-    # Non-executable formats: skip pickle scanners, only run ModelAudit for config checks
-    if ext in SAFE_EXTENSIONS:
-        results = []
-        for name in SCANNER_RUNNERS:
-            if name == "modelaudit" and available.get(name):
-                results.append(run_modelaudit(path, verbose))
-            else:
-                r = ScannerResult(scanner=name, available=available.get(name, False), verdict=Verdict.FORMAT_SAFE)
-                r.details.append(f"Non-executable format ({ext})")
-                results.append(r)
-        return results, aggregate_verdict(results)
-
-    # Run all available scanners
     results = []
     for name, runner in SCANNER_RUNNERS.items():
-        if available.get(name):
+        action = routing.get(name, "skip")
+
+        if action == "skip":
+            r = ScannerResult(scanner=name, available=available.get(name, False), verdict=Verdict.SAFE)
+            if ext in SAFE_EXTENSIONS:
+                r.verdict = Verdict.FORMAT_SAFE
+                r.details.append(f"Non-executable format ({ext})")
+            else:
+                r.details.append(f"Not applicable for {ext} files")
+            results.append(r)
+        elif not available.get(name):
+            results.append(ScannerResult(scanner=name, available=False, verdict=Verdict.ERROR))
+        else:
             if verbose:
                 print(f"  Running {name}...")
             results.append(runner(path, verbose))
-        else:
-            results.append(ScannerResult(scanner=name, available=False, verdict=Verdict.ERROR))
 
     return results, aggregate_verdict(results)
 
