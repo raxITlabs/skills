@@ -486,6 +486,98 @@ def scan_file(path: Path, available: dict[str, bool], verbose: bool) -> tuple[li
     return results, aggregate_verdict(results)
 
 
+def detect_hf_models(directory: Path) -> list[dict]:
+    """
+    Detect HuggingFace model directories by finding config.json files
+    with model_type, _name_or_path, or architectures fields.
+    Returns metadata for each detected HF model.
+    """
+    hf_models = []
+    for config_path in directory.rglob("config.json"):
+        try:
+            config = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        # Check for HuggingFace signals
+        model_type = config.get("model_type")
+        hf_id = config.get("_name_or_path", "")
+        architectures = config.get("architectures", [])
+        auto_map = config.get("auto_map", {})
+        trust_remote = config.get("trust_remote_code", False)
+
+        if not model_type and not architectures:
+            continue  # Not a HF model config
+
+        model_dir = config_path.parent
+
+        # Check what formats exist in this directory
+        formats_found = set()
+        for f in model_dir.iterdir():
+            if f.is_file():
+                formats_found.add(f.suffix.lower())
+
+        has_pickle = bool(formats_found & PICKLE_EXTENSIONS)
+        has_safetensors = ".safetensors" in formats_found
+        has_onnx = ".onnx" in formats_found
+
+        hf_models.append({
+            "dir": str(model_dir),
+            "config_path": str(config_path),
+            "model_type": model_type,
+            "hf_id": hf_id if "/" in str(hf_id) else None,
+            "architectures": architectures,
+            "auto_map": auto_map,
+            "trust_remote_code": trust_remote,
+            "has_pickle": has_pickle,
+            "has_safetensors": has_safetensors,
+            "has_onnx": has_onnx,
+            "formats": sorted(formats_found),
+        })
+
+    return hf_models
+
+
+def format_hf_summary(hf_models: list[dict]) -> str:
+    """Format a summary of detected HuggingFace models."""
+    if not hf_models:
+        return ""
+
+    lines = ["## HuggingFace Models Detected", ""]
+    for m in hf_models:
+        dir_name = Path(m["dir"]).name
+        lines.append(f"### {dir_name}")
+        if m["hf_id"]:
+            lines.append(f"- **HuggingFace ID:** `{m['hf_id']}`")
+        if m["model_type"]:
+            lines.append(f"- **Model type:** {m['model_type']}")
+        if m["architectures"]:
+            lines.append(f"- **Architecture:** {', '.join(m['architectures'])}")
+
+        # Format warnings
+        if m["trust_remote_code"]:
+            lines.append(f"- **trust_remote_code: True** — loads arbitrary Python from repo")
+        if m["auto_map"]:
+            files = [v.split(".")[0] + ".py" for v in m["auto_map"].values() if "." in v]
+            lines.append(f"- **auto_map** loads: {', '.join(files)} (NOT scanned by model scanners)")
+
+        # Format mix
+        if m["has_pickle"] and m["has_safetensors"]:
+            lines.append(f"- Formats: pickle AND safetensors (use safetensors for ISM-2072)")
+        elif m["has_pickle"]:
+            lines.append(f"- **Pickle only** — no SafeTensors alternative available locally")
+            if m["hf_id"]:
+                lines.append(f"  - Check HuggingFace for SafeTensors version: `uv run scripts/scan.py {m['hf_id']}`")
+        elif m["has_safetensors"]:
+            lines.append(f"- SafeTensors only (format-safe)")
+        elif m["has_onnx"]:
+            lines.append(f"- ONNX (format-safe)")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def find_model_files(directory: Path) -> list[Path]:
     files = []
     for f in directory.rglob("*"):
@@ -616,6 +708,8 @@ def main():
         print()
 
     # Resolve input: HuggingFace model ID or local path
+    hf_models_detected = []
+
     if is_hf_model_id(args.path):
         if not quiet:
             print(f"HuggingFace model: {args.path}")
@@ -628,9 +722,17 @@ def main():
             sys.exit(1)
         files = find_model_files(target) if target.is_dir() else [target]
 
+        # Detect HuggingFace models in the directory
+        if target.is_dir():
+            hf_models_detected = detect_hf_models(target)
+
     if not files:
         print(f"No scannable model files found.", file=sys.stderr)
         sys.exit(1)
+
+    # Show HuggingFace model detection results
+    if not quiet and hf_models_detected:
+        print(format_hf_summary(hf_models_detected))
 
     if not quiet:
         print(f"Scanning {len(files)} file(s)...\n")
@@ -656,12 +758,18 @@ def main():
 
     # JSON output
     if args.json:
-        output = all_results[0] if len(all_results) == 1 else {
-            "model": args.path,
+        output = {
+            "input": args.path,
             "overall_verdict": worst.value,
             "files_scanned": len(all_results),
             "results": all_results,
         }
+        if hf_models_detected:
+            output["huggingface_models"] = hf_models_detected
+        if len(all_results) == 1:
+            output = all_results[0]
+            if hf_models_detected:
+                output["huggingface_models"] = hf_models_detected
         print(json.dumps(output, indent=2))
 
     # Summary for multi-file scans
@@ -674,6 +782,23 @@ def main():
             verdicts[v] = verdicts.get(v, 0) + 1
         for v, count in sorted(verdicts.items()):
             print(f"  {v}: {count} file(s)")
+
+        # ISM-2072 compliance summary
+        pickle_files = [r for r in all_results if r["extension"] in (".pkl", ".pt", ".pth", ".bin", ".joblib")]
+        safe_format_files = [r for r in all_results if r["extension"] in (".safetensors", ".onnx", ".gguf")]
+        if pickle_files:
+            print()
+            print(f"ISM-2072: {len(pickle_files)} file(s) use executable formats (pickle/joblib)")
+            if safe_format_files:
+                print(f"          {len(safe_format_files)} file(s) use non-executable formats (safetensors/onnx)")
+            print(f"          Migrate pickle files to SafeTensors for compliance")
+
+        # HF model suggestions
+        if hf_models_detected:
+            for m in hf_models_detected:
+                if m["hf_id"] and m["has_pickle"] and not m["has_safetensors"]:
+                    print(f"\nHint: {m['hf_id']} is pickle-only locally.")
+                    print(f"  Check HF for SafeTensors: uv run scripts/scan.py {m['hf_id']}")
 
     sys.exit(0 if worst in (Verdict.SAFE, Verdict.FORMAT_SAFE) else 1)
 
