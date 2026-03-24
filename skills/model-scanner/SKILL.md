@@ -119,7 +119,14 @@ This prevents false positives from pickle scanners trying to parse JSON or NumPy
 
 ## Caveats to Always Communicate
 
-1. **No scanner is perfect.** 133 known bypass techniques exist. Clean scan ≠ guaranteed safety.
+1. **No scanner is perfect.** 133 known bypass techniques exist. Clean scan does not equal guaranteed safety.
 2. **SafeTensors is not a complete fix.** `auto_map` + `trust_remote_code=True` loads arbitrary Python alongside safe weights.
 3. **ISM-2072 compliance** requires non-executable formats, not just scanning.
 4. **Dynamic analysis** catches more. For critical models, recommend [Dyana](https://github.com/dreadnode/dyana).
+
+## References
+
+For detailed scanner comparison data, bypass techniques, and CVE details, read `references/scanner-landscape.md`. Consult it when:
+- The user asks which scanner is best or how they compare
+- You need to explain why multi-scanner matters (bypass rates, CVE data)
+- The user asks about ISM-2072 or IRAP compliance
