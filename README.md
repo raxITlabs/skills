@@ -2,56 +2,80 @@
 
 Open-source Agent Skills for AI Security by [raxIT](https://raxit.ai).
 
-Skills are folders of instructions, scripts, and resources that Claude loads dynamically to improve performance on specialized tasks. These skills focus on AI security workflows that practitioners need.
+## model-scanner
 
-For more about the Agent Skills standard, see [agentskills.io](http://agentskills.io).
+**ML supply chain security scanner.** One command. Risk score. Global compliance mapping. Zero config.
 
-## Skills
+### The Problem
 
-| Skill | Description |
-|-------|-------------|
-| [model-scanner](./skills/model-scanner) | Multi-scanner ML model security analysis. Runs pickle, safetensors, and other model files through Fickling, ModelScan, ModelAudit, and PickleScan with aggregated verdicts. |
+83% of AI models on HuggingFace use pickle, a format designed to execute arbitrary code on deserialization. Your AppSec team scans code, containers, dependencies. Model files? Treated as "just data." They're not.
 
-## Install in Claude Code
+7 CVEs in PickleScan (the scanner HuggingFace uses) in 2025 alone. 133 known bypass techniques against all static scanners. 100+ malicious models found on HuggingFace with reverse shells.
 
-Register as a plugin marketplace:
+Australia became the first government to mandate non-executable model formats (ISM-2072, December 2025). The EU AI Act requires robustness against model poisoning. OWASP lists it as LLM06. Nobody has a tool that checks all of this.
 
-```
-/plugin marketplace add raxITlabs/skills
-```
+Until now.
 
-Then install:
+### Install
 
-```
-/plugin install ai-security-skills@raxit-ai-security-skills
-```
-
-Or install a specific skill directly:
-
-```
+```bash
 npx skills add raxITlabs/skills@model-scanner -g -y
 ```
 
-## Why These Skills Exist
+Then in Claude Code, just say: **"scan my models"**
 
-AI model files are treated as "just data" by most security teams. They're not. Pickle-based model files can execute arbitrary code on load. Static scanners have been bypassed repeatedly (7 CVEs in PickleScan in 2025 alone, 133 exploitable gadgets with near-100% bypass rate).
+### What It Does
 
-Australia's ISM-2072 (December 2025) became the first government control to mandate non-executable model formats. These skills help practitioners assess their model supply chain security.
-
-## Creating Your Own Skills
-
-Use the `template/` directory as a starting point. Each skill needs a `SKILL.md` file with YAML frontmatter:
-
-```markdown
----
-name: my-skill-name
-description: A clear description of what this skill does and when to use it
----
-
-# My Skill Name
-
-[Instructions here]
 ```
+Inventory    → Discovers all model files, detects HuggingFace models
+Assessment   → Runs 4 scanners (Fickling, ModelScan, PickleScan, ModelAudit)
+Risk Score   → 0-100 with transparent breakdown
+Compliance   → Maps to ISM-2072, EU AI Act, OWASP LLM06, MITRE ATLAS, NIST AI RMF
+Remediation  → Ordered actions: what to fix first and how
+```
+
+### Direct Usage
+
+```bash
+# Scan a directory
+uv run scripts/scan.py ./models/
+
+# Scan a HuggingFace model
+uv run scripts/scan.py microsoft/phi-2
+
+# JSON output for CI/CD
+uv run scripts/scan.py ./models/ --json
+```
+
+### Compliance Frameworks
+
+| Framework | Controls Checked |
+|-----------|-----------------|
+| Australian ISM | ISM-2072 (format), ISM-2086 (integrity), ISM-2087 (training data), ISM-2092 (access control) |
+| EU AI Act | Article 15 (robustness against model poisoning) |
+| OWASP LLM Top 10 | LLM06 (Supply Chain Vulnerabilities) |
+| MITRE ATLAS | AML.T0010 (ML Supply Chain Compromise) |
+| NIST AI RMF | MAP 3.4 (supply chain), MANAGE 2.4 (risk tracking), MANAGE 4.1 (monitoring) |
+
+### Scanners
+
+4 scanners with different detection strategies. No single scanner catches everything.
+
+| Scanner | Approach | Why |
+|---------|----------|-----|
+| Fickling | Allowlist + decompiler | Blocks unknown imports by default |
+| ModelScan | Denylist static | Broadest ML format support |
+| PickleScan | Denylist static | Same scanner HuggingFace uses |
+| ModelAudit | Multi-format static | 42+ formats, catches config issues |
+
+All auto-installed on first run. Zero configuration.
+
+### Important
+
+- No scanner is perfect. 133 known bypass techniques exist. A clean scan reduces risk but does not guarantee safety.
+- SafeTensors is not a complete fix. `trust_remote_code` + `auto_map` loads arbitrary Python alongside safe weights.
+- ISM-2072 compliance requires non-executable formats, not just scanning.
+- For critical models, use dynamic analysis: [Dyana](https://github.com/dreadnode/dyana)
 
 ## License
 

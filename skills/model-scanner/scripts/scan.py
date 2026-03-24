@@ -486,173 +486,21 @@ def scan_file(path: Path, available: dict[str, bool], verbose: bool) -> tuple[li
     return results, aggregate_verdict(results)
 
 
-def detect_hf_models(directory: Path) -> list[dict]:
-    """
-    Detect HuggingFace model directories by finding config.json files
-    with model_type, _name_or_path, or architectures fields.
-    Returns metadata for each detected HF model.
-    """
-    hf_models = []
-    for config_path in directory.rglob("config.json"):
-        try:
-            config = json.loads(config_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
+# Import from sibling modules (same scripts/ directory)
+_scripts_dir = Path(__file__).parent
+sys.path.insert(0, str(_scripts_dir))
 
-        # Check for HuggingFace signals
-        model_type = config.get("model_type")
-        hf_id = config.get("_name_or_path", "")
-        architectures = config.get("architectures", [])
-        auto_map = config.get("auto_map", {})
-        trust_remote = config.get("trust_remote_code", False)
-
-        if not model_type and not architectures:
-            continue  # Not a HF model config
-
-        model_dir = config_path.parent
-
-        # Check what formats exist in this directory
-        formats_found = set()
-        for f in model_dir.iterdir():
-            if f.is_file():
-                formats_found.add(f.suffix.lower())
-
-        has_pickle = bool(formats_found & PICKLE_EXTENSIONS)
-        has_safetensors = ".safetensors" in formats_found
-        has_onnx = ".onnx" in formats_found
-
-        hf_models.append({
-            "dir": str(model_dir),
-            "config_path": str(config_path),
-            "model_type": model_type,
-            "hf_id": hf_id if "/" in str(hf_id) else None,
-            "architectures": architectures,
-            "auto_map": auto_map,
-            "trust_remote_code": trust_remote,
-            "has_pickle": has_pickle,
-            "has_safetensors": has_safetensors,
-            "has_onnx": has_onnx,
-            "formats": sorted(formats_found),
-        })
-
-    return hf_models
-
-
-def format_hf_summary(hf_models: list[dict]) -> str:
-    """Format a summary of detected HuggingFace models."""
-    if not hf_models:
-        return ""
-
-    lines = ["## HuggingFace Models Detected", ""]
-    for m in hf_models:
-        dir_name = Path(m["dir"]).name
-        lines.append(f"### {dir_name}")
-        if m["hf_id"]:
-            lines.append(f"- **HuggingFace ID:** `{m['hf_id']}`")
-        if m["model_type"]:
-            lines.append(f"- **Model type:** {m['model_type']}")
-        if m["architectures"]:
-            lines.append(f"- **Architecture:** {', '.join(m['architectures'])}")
-
-        # Format warnings
-        if m["trust_remote_code"]:
-            lines.append(f"- **trust_remote_code: True** — loads arbitrary Python from repo")
-        if m["auto_map"]:
-            files = [v.split(".")[0] + ".py" for v in m["auto_map"].values() if "." in v]
-            lines.append(f"- **auto_map** loads: {', '.join(files)} (NOT scanned by model scanners)")
-
-        # Format mix
-        if m["has_pickle"] and m["has_safetensors"]:
-            lines.append(f"- Formats: pickle AND safetensors (use safetensors for ISM-2072)")
-        elif m["has_pickle"]:
-            lines.append(f"- **Pickle only** — no SafeTensors alternative available locally")
-            if m["hf_id"]:
-                lines.append(f"  - Check HuggingFace for SafeTensors version: `uv run scripts/scan.py {m['hf_id']}`")
-        elif m["has_safetensors"]:
-            lines.append(f"- SafeTensors only (format-safe)")
-        elif m["has_onnx"]:
-            lines.append(f"- ONNX (format-safe)")
-
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def find_model_files(directory: Path) -> list[Path]:
-    files = []
-    for f in directory.rglob("*"):
-        if f.is_file() and f.suffix.lower() in SCANNABLE_EXTENSIONS:
-            # Skip tokenizer/vocab files
-            if any(fnmatch.fnmatch(f.name, p) for p in HF_SKIP_PATTERNS):
-                continue
-            files.append(f)
-    return sorted(files)
+from inventory import find_model_files, detect_hf_models, format_hf_summary, format_inventory
+from score import calculate_score, format_score_report, format_score_json
+from comply import map_compliance, classify_findings, format_compliance_report, format_compliance_json
+from remediate import get_remediation, format_remediation_report, format_remediation_json
 
 
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
-def format_report(path: Path, results: list[ScannerResult], overall: Verdict) -> str:
-    lines = []
-    lines.append(f"# Model Security Scan Report")
-    lines.append(f"")
-    lines.append(f"**File:** `{path.name}`")
-    lines.append(f"**Path:** `{path}`")
-    lines.append(f"**Size:** {path.stat().st_size:,} bytes")
-    lines.append(f"**Extension:** `{path.suffix}`")
-    lines.append(f"")
-
-    verdict_display = {
-        Verdict.SAFE: "SAFE",
-        Verdict.FORMAT_SAFE: "FORMAT_SAFE (non-executable format)",
-        Verdict.SUSPICIOUS: "SUSPICIOUS",
-        Verdict.MALICIOUS: "MALICIOUS",
-        Verdict.ERROR: "ERROR",
-    }
-
-    lines.append(f"## Overall Verdict: {verdict_display.get(overall, str(overall))}")
-    lines.append(f"")
-    lines.append(f"## Scanner Results")
-    lines.append(f"")
-
-    for r in results:
-        if not r.available:
-            lines.append(f"### {r.scanner}: skipped (not installed)")
-            lines.append(f"")
-            continue
-
-        lines.append(f"### {r.scanner}: {verdict_display.get(r.verdict, str(r.verdict))}")
-        for d in r.details:
-            lines.append(f"- {d}")
-        if r.error:
-            lines.append(f"- Error: {r.error}")
-        lines.append(f"")
-
-    lines.append(f"## Recommendations")
-    lines.append(f"")
-    if overall == Verdict.MALICIOUS:
-        lines.append(f"- DO NOT load this model. Malicious code detected.")
-        lines.append(f"- Delete or quarantine the file.")
-        lines.append(f"- If from HuggingFace, report via their security contact.")
-    elif overall == Verdict.SUSPICIOUS:
-        lines.append(f"- Review flagged imports manually before loading.")
-        lines.append(f"- Consider dynamic analysis in a sandbox (Dyana).")
-        lines.append(f"- Look for a SafeTensors version of this model.")
-    elif overall == Verdict.FORMAT_SAFE:
-        lines.append(f"- Weight data uses a non-executable format.")
-        lines.append(f"- Check config.json for `trust_remote_code` or `auto_map` (unscanned Python code).")
-    else:
-        lines.append(f"- No issues detected. Static scanners have known bypass techniques (133+).")
-        lines.append(f"- For high-value deployments, also run dynamic sandbox analysis.")
-
-    lines.append(f"")
-    lines.append(f"---")
-    lines.append(f"*Scanned by raxIT model-scanner | github.com/raxITlabs/skills*")
-    return "\n".join(lines)
-
-
-def format_json(path: Path, results: list[ScannerResult], overall: Verdict) -> dict:
+def format_file_json(path: Path, results: list[ScannerResult], overall: Verdict) -> dict:
     return {
         "file": str(path),
         "filename": path.name,
@@ -678,7 +526,7 @@ def format_json(path: Path, results: list[ScannerResult], overall: Verdict) -> d
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scan ML model files for malicious code. Zero-config.",
+        description="ML Supply Chain Security Scanner. Zero-config.",
         epilog="Accepts local files, directories, or HuggingFace model IDs (e.g., microsoft/phi-2)",
     )
     parser.add_argument("path", help="File, directory, or HuggingFace model ID")
@@ -722,7 +570,6 @@ def main():
             sys.exit(1)
         files = find_model_files(target) if target.is_dir() else [target]
 
-        # Detect HuggingFace models in the directory
         if target.is_dir():
             hf_models_detected = detect_hf_models(target)
 
@@ -730,52 +577,56 @@ def main():
         print(f"No scannable model files found.", file=sys.stderr)
         sys.exit(1)
 
-    # Show HuggingFace model detection results
-    if not quiet and hf_models_detected:
-        print(format_hf_summary(hf_models_detected))
-
+    # --- Inventory ---
     if not quiet:
+        print(format_inventory(files))
+        if hf_models_detected:
+            print(format_hf_summary(hf_models_detected))
         print(f"Scanning {len(files)} file(s)...\n")
 
-    # Scan all files
+    # --- Assessment ---
     all_results = []
     worst = Verdict.SAFE
     verdict_priority = {Verdict.SAFE: 0, Verdict.FORMAT_SAFE: 1, Verdict.SUSPICIOUS: 2, Verdict.MALICIOUS: 3}
 
     for f in files:
-        if not quiet:
+        if not quiet and args.verbose:
             print(f"--- {f.name} ---")
 
         results, overall = scan_file(f, available, args.verbose)
-        all_results.append(format_json(f, results, overall))
-
-        if not quiet:
-            print(format_report(f, results, overall))
-            print()
+        all_results.append(format_file_json(f, results, overall))
 
         if verdict_priority.get(overall, -1) > verdict_priority.get(worst, -1):
             worst = overall
 
-    # JSON output
+    # --- Risk Score ---
+    risk_score, score_breakdown = calculate_score(all_results, hf_models_detected)
+
+    # --- Compliance ---
+    compliance = map_compliance(all_results, hf_models_detected)
+
+    # --- Remediation ---
+    finding_types = classify_findings(all_results, hf_models_detected)
+    remediation_steps = get_remediation(finding_types)
+
+    # --- Output ---
     if args.json:
         output = {
             "input": args.path,
             "overall_verdict": worst.value,
             "files_scanned": len(all_results),
+            "score": format_score_json(risk_score, score_breakdown),
+            "compliance": format_compliance_json(compliance),
+            "remediation": format_remediation_json(remediation_steps),
             "results": all_results,
         }
         if hf_models_detected:
             output["huggingface_models"] = hf_models_detected
-        if len(all_results) == 1:
-            output = all_results[0]
-            if hf_models_detected:
-                output["huggingface_models"] = hf_models_detected
         print(json.dumps(output, indent=2))
-
-    # Summary for multi-file scans
-    if not quiet and len(files) > 1:
-        print("=" * 60)
-        print(f"Overall: {worst.value}")
+    else:
+        # Terminal: structured report
+        # Assessment summary
+        print("## Assessment\n")
         verdicts = {}
         for r in all_results:
             v = r["overall_verdict"]
@@ -783,22 +634,22 @@ def main():
         for v, count in sorted(verdicts.items()):
             print(f"  {v}: {count} file(s)")
 
-        # ISM-2072 compliance summary
-        pickle_files = [r for r in all_results if r["extension"] in (".pkl", ".pt", ".pth", ".bin", ".joblib")]
-        safe_format_files = [r for r in all_results if r["extension"] in (".safetensors", ".onnx", ".gguf")]
-        if pickle_files:
-            print()
-            print(f"ISM-2072: {len(pickle_files)} file(s) use executable formats (pickle/joblib)")
-            if safe_format_files:
-                print(f"          {len(safe_format_files)} file(s) use non-executable formats (safetensors/onnx)")
-            print(f"          Migrate pickle files to SafeTensors for compliance")
+        # Per-file details (only for non-SAFE)
+        for r in all_results:
+            if r["overall_verdict"] in ("MALICIOUS", "SUSPICIOUS"):
+                print(f"\n  **{r['filename']}** — {r['overall_verdict']}")
+                for s in r["scanners"]:
+                    if s["available"] and s["verdict"] not in ("SAFE", "ERROR") and "Not applicable" not in str(s.get("details", [])):
+                        details_str = "; ".join(s["details"][:3]) if s["details"] else ""
+                        print(f"    {s['name']}: {s['verdict']} {details_str}")
 
-        # HF model suggestions
-        if hf_models_detected:
-            for m in hf_models_detected:
-                if m["hf_id"] and m["has_pickle"] and not m["has_safetensors"]:
-                    print(f"\nHint: {m['hf_id']} is pickle-only locally.")
-                    print(f"  Check HF for SafeTensors: uv run scripts/scan.py {m['hf_id']}")
+        print()
+        print(format_score_report(risk_score, score_breakdown))
+        print(format_compliance_report(compliance))
+        print(format_remediation_report(remediation_steps))
+
+        print("---")
+        print("*raxIT model-scanner | github.com/raxITlabs/skills*")
 
     sys.exit(0 if worst in (Verdict.SAFE, Verdict.FORMAT_SAFE) else 1)
 
