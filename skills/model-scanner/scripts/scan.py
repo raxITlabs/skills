@@ -105,7 +105,8 @@ def detect_scanners() -> dict[str, bool]:
         "fickling": check_tool("fickling", ["fickling", "--help"]),
         "modelscan": check_tool("modelscan", ["modelscan", "--help"]),
         "picklescan": check_tool("picklescan", ["picklescan", "--help"]),
-        "modelaudit": check_tool("modelaudit", ["promptfoo", "--help"]),
+        # Check scan-model specifically, not just promptfoo
+        "modelaudit": check_tool("modelaudit", ["promptfoo", "scan-model", "--help"]),
     }
 
 
@@ -629,23 +630,42 @@ def main():
         print(json.dumps(output, indent=2))
     else:
         # Terminal: structured report
-        # Assessment summary
-        print("## Assessment\n")
-        verdicts = {}
-        for r in all_results:
-            v = r["overall_verdict"]
-            verdicts[v] = verdicts.get(v, 0) + 1
-        for v, count in sorted(verdicts.items()):
-            print(f"  {v}: {count} file(s)")
+        # Assessment: separate threats from compliance gaps
+        malicious = [r for r in all_results if r["overall_verdict"] == "MALICIOUS"]
+        suspicious = [r for r in all_results if r["overall_verdict"] == "SUSPICIOUS"]
+        safe_pickle = [r for r in all_results
+                       if r["overall_verdict"] == "SAFE"
+                       and r["extension"] in (".pkl", ".pickle", ".pt", ".pth", ".bin", ".joblib")]
+        format_safe = [r for r in all_results if r["overall_verdict"] == "FORMAT_SAFE"]
 
-        # Per-file details (only for non-SAFE)
-        for r in all_results:
-            if r["overall_verdict"] in ("MALICIOUS", "SUSPICIOUS"):
-                print(f"\n  **{r['filename']}** — {r['overall_verdict']}")
+        if malicious:
+            print("## THREATS (immediate action required)\n")
+            for r in malicious:
+                print(f"  **{r['filename']}** — MALICIOUS")
+                for s in r["scanners"]:
+                    if s["available"] and s["verdict"] == "MALICIOUS":
+                        details_str = "; ".join(s["details"][:3]) if s["details"] else ""
+                        print(f"    {s['name']}: {details_str}")
+            print()
+
+        if suspicious:
+            print("## SUSPICIOUS (needs review)\n")
+            for r in suspicious:
+                print(f"  **{r['filename']}** — SUSPICIOUS")
                 for s in r["scanners"]:
                     if s["available"] and s["verdict"] not in ("SAFE", "ERROR") and "Not applicable" not in str(s.get("details", [])):
                         details_str = "; ".join(s["details"][:3]) if s["details"] else ""
                         print(f"    {s['name']}: {s['verdict']} {details_str}")
+            print()
+
+        if safe_pickle:
+            print("## COMPLIANCE GAP (executable format, not malicious)\n")
+            for r in safe_pickle:
+                print(f"  {r['filename']} ({r['extension']}) — safe content, non-compliant format")
+            print()
+
+        if format_safe:
+            print(f"## SAFE ({len(format_safe)} file(s) in non-executable format)\n")
 
         print()
         print(format_score_report(risk_score, score_breakdown))
