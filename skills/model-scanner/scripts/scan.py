@@ -103,6 +103,15 @@ def detect_scanners() -> dict[str, bool]:
     }
 
 
+def find_pip_cmd() -> list[str]:
+    """Find the best pip install command: uv pip > pip > python -m pip."""
+    if shutil.which("uv"):
+        return ["uv", "pip", "install"]
+    if shutil.which("pip"):
+        return ["pip", "install"]
+    return [sys.executable, "-m", "pip", "install"]
+
+
 def auto_install(available: dict[str, bool], quiet: bool = False) -> dict[str, bool]:
     """Install any missing scanners. Returns updated availability."""
     missing_pip = [pkg for name, pkg in PIP_SCANNERS.items() if not available.get(name)]
@@ -115,11 +124,13 @@ def auto_install(available: dict[str, bool], quiet: bool = False) -> dict[str, b
         print("Installing missing scanners (first-run setup)...")
 
     if missing_pip:
+        pip_cmd = find_pip_cmd()
+        cmd_name = " ".join(pip_cmd)
         if not quiet:
-            print(f"  pip install {' '.join(missing_pip)}")
+            print(f"  {cmd_name} {' '.join(missing_pip)}")
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", *missing_pip],
-            capture_output=quiet, timeout=120,
+            [*pip_cmd, "-q", *missing_pip],
+            capture_output=quiet, timeout=180,
         )
 
     if missing_npm and shutil.which("npm"):
