@@ -1,28 +1,38 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = ["huggingface_hub"]
 # ///
 """
-Multi-scanner ML model security analysis.
+Multi-scanner ML model security analysis. Zero-config.
 
-Runs model files through available scanners (Fickling, ModelScan, PickleScan, ModelAudit)
-and aggregates results into a verdict.
+Auto-installs scanners on first run. Downloads HuggingFace models by ID.
+Runs model files through all available scanners and aggregates results.
 
 Usage:
-    uv run scripts/scan.py <path> [--verbose] [--json] [--install]
+    uv run scripts/scan.py <path-or-hf-model-id> [--verbose] [--json]
+
+Examples:
+    uv run scripts/scan.py model.pkl
+    uv run scripts/scan.py ./models/
+    uv run scripts/scan.py microsoft/phi-2
+    uv run scripts/scan.py deepseek-ai/deepseek-coder-1.3b-base --json
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
 
 class Verdict(Enum):
     SAFE = "SAFE"
@@ -42,6 +52,10 @@ class ScannerResult:
     error: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 SAFE_EXTENSIONS = {".safetensors", ".gguf", ".onnx"}
 
 SCANNABLE_EXTENSIONS = {
@@ -51,6 +65,26 @@ SCANNABLE_EXTENSIONS = {
     ".json", ".yaml", ".yml",
 }
 
+HF_SKIP_PATTERNS = {
+    "tokenizer*", "vocab*", "merges*", "special_tokens*",
+    "*.md", "*.txt", "*.gitattributes", "*.gitignore", "*.msgpack",
+    "*.lock", "*.html",
+}
+
+PIP_SCANNERS = {
+    "fickling": "fickling",
+    "modelscan": "modelscan",
+    "picklescan": "picklescan",
+}
+
+NPM_SCANNERS = {
+    "modelaudit": "promptfoo",
+}
+
+
+# ---------------------------------------------------------------------------
+# Auto-install (zero-config)
+# ---------------------------------------------------------------------------
 
 def check_tool(name: str, check_cmd: list[str]) -> bool:
     try:
@@ -60,33 +94,109 @@ def check_tool(name: str, check_cmd: list[str]) -> bool:
         return False
 
 
-def detect_available_scanners() -> dict[str, bool]:
+def detect_scanners() -> dict[str, bool]:
     return {
         "fickling": check_tool("fickling", ["fickling", "--help"]),
         "modelscan": check_tool("modelscan", ["modelscan", "--help"]),
         "picklescan": check_tool("picklescan", ["picklescan", "--help"]),
-        "modelaudit": check_tool("modelaudit", ["promptfoo", "scan-model", "--help"]),
+        "modelaudit": check_tool("modelaudit", ["promptfoo", "--help"]),
     }
 
 
-def install_scanners() -> None:
-    print("\n--- Installing scanners ---")
+def auto_install(available: dict[str, bool], quiet: bool = False) -> dict[str, bool]:
+    """Install any missing scanners. Returns updated availability."""
+    missing_pip = [pkg for name, pkg in PIP_SCANNERS.items() if not available.get(name)]
+    missing_npm = [pkg for name, pkg in NPM_SCANNERS.items() if not available.get(name)]
 
-    pip_packages = ["fickling", "modelscan", "picklescan"]
-    print(f"Installing Python scanners: {', '.join(pip_packages)}")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", *pip_packages],
-        capture_output=False,
-    )
+    if not missing_pip and not missing_npm:
+        return available
 
-    if shutil.which("npm"):
-        print("Installing ModelAudit (promptfoo)...")
-        subprocess.run(["npm", "install", "-g", "promptfoo"], capture_output=False)
-    else:
-        print("npm not found, skipping ModelAudit install")
+    if not quiet:
+        print("Installing missing scanners (first-run setup)...")
 
-    print("--- Installation complete ---\n")
+    if missing_pip:
+        if not quiet:
+            print(f"  pip install {' '.join(missing_pip)}")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", *missing_pip],
+            capture_output=quiet, timeout=120,
+        )
 
+    if missing_npm and shutil.which("npm"):
+        if not quiet:
+            print(f"  npm install -g {' '.join(missing_npm)}")
+        subprocess.run(
+            ["npm", "install", "-g", *missing_npm],
+            capture_output=quiet, timeout=120,
+        )
+    elif missing_npm and not quiet:
+        print("  npm not found, skipping ModelAudit (install Node.js for full coverage)")
+
+    if not quiet:
+        print()
+
+    return detect_scanners()
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace support
+# ---------------------------------------------------------------------------
+
+def is_hf_model_id(path_str: str) -> bool:
+    """Check if input looks like a HuggingFace model ID (org/model)."""
+    return "/" in path_str and not Path(path_str).exists()
+
+
+def should_scan_hf_file(filename: str) -> bool:
+    name = Path(filename).name
+    if any(fnmatch.fnmatch(name, p) for p in HF_SKIP_PATTERNS):
+        return False
+    return any(fnmatch.fnmatch(name, f"*{ext}") for ext in SCANNABLE_EXTENSIONS)
+
+
+def download_hf_model(model_id: str, quiet: bool = False) -> Path:
+    """Download scannable files from a HuggingFace model repo."""
+    from huggingface_hub import hf_hub_download, list_repo_files
+
+    if not quiet:
+        print(f"Fetching file list for {model_id}...")
+
+    all_files = list(list_repo_files(model_id))
+    scannable = [f for f in all_files if should_scan_hf_file(f)]
+
+    if not quiet:
+        print(f"  {len(all_files)} total files, {len(scannable)} scannable")
+
+        # Show format breakdown
+        formats = {}
+        for f in all_files:
+            ext = Path(f).suffix or "(no ext)"
+            formats[ext] = formats.get(ext, 0) + 1
+        for ext, count in sorted(formats.items(), key=lambda x: -x[1])[:8]:
+            print(f"    {ext}: {count}")
+        print()
+
+    if not scannable:
+        print(f"No scannable files in {model_id}", file=sys.stderr)
+        sys.exit(1)
+
+    local_dir = Path("/tmp") / "model-scanner" / model_id.replace("/", "__")
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename in scannable:
+        if not quiet:
+            print(f"  Downloading {filename}...")
+        hf_hub_download(repo_id=model_id, filename=filename, local_dir=str(local_dir))
+
+    if not quiet:
+        print()
+
+    return local_dir
+
+
+# ---------------------------------------------------------------------------
+# Scanners
+# ---------------------------------------------------------------------------
 
 def run_fickling(path: Path, verbose: bool) -> ScannerResult:
     result = ScannerResult(scanner="fickling", available=True, verdict=Verdict.SAFE)
@@ -98,35 +208,30 @@ def run_fickling(path: Path, verbose: bool) -> ScannerResult:
         result.raw_output = proc.stdout + proc.stderr
         output = result.raw_output.lower()
 
-        if proc.returncode != 0 and ("error" in output or "traceback" in output):
-            if "not a valid pickle" in output or "unsupported" in output:
-                result.verdict = Verdict.SAFE
-                result.details.append("File format not applicable to Fickling")
-            else:
-                result.verdict = Verdict.ERROR
-                result.error = proc.stderr[:500]
+        if "not a valid pickle" in output or "unsupported" in output:
+            result.verdict = Verdict.SAFE
+            result.details.append("Format not applicable to Fickling")
         elif "malicious" in output or "unsafe" in output or "dangerous" in output:
             result.verdict = Verdict.MALICIOUS
             for line in result.raw_output.splitlines():
-                line_lower = line.lower()
-                if any(w in line_lower for w in ["unsafe", "malicious", "dangerous", "import", "call"]):
+                if any(w in line.lower() for w in ["unsafe", "malicious", "dangerous", "import", "call"]):
                     result.details.append(line.strip())
         elif "suspicious" in output or "warning" in output or "unknown" in output:
             result.verdict = Verdict.SUSPICIOUS
             for line in result.raw_output.splitlines():
                 if any(w in line.lower() for w in ["suspicious", "warning", "unknown"]):
                     result.details.append(line.strip())
+        elif proc.returncode != 0:
+            result.verdict = Verdict.ERROR
+            result.error = proc.stderr[:500]
         else:
-            result.verdict = Verdict.SAFE
             result.details.append("No unsafe imports detected (allowlist-based)")
-
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
     except Exception as e:
         result.verdict = Verdict.ERROR
         result.error = str(e)
-
     return result
 
 
@@ -143,7 +248,6 @@ def run_modelscan(path: Path, verbose: bool) -> ScannerResult:
             data = json.loads(proc.stdout)
             issues = data.get("issues", [])
             if not issues:
-                result.verdict = Verdict.SAFE
                 result.details.append("No issues found")
             else:
                 severities = [i.get("severity", "").upper() for i in issues]
@@ -153,30 +257,26 @@ def run_modelscan(path: Path, verbose: bool) -> ScannerResult:
                     result.verdict = Verdict.SUSPICIOUS
                 else:
                     result.verdict = Verdict.SUSPICIOUS
-
                 for issue in issues[:10]:
-                    desc = issue.get("description", issue.get("operator", "Unknown issue"))
-                    sev = issue.get("severity", "unknown")
+                    desc = issue.get("description", issue.get("operator", "Unknown"))
+                    sev = issue.get("severity", "?")
                     result.details.append(f"[{sev}] {desc}")
         except json.JSONDecodeError:
             output = result.raw_output.lower()
             if "no issues" in output or proc.returncode == 0:
-                result.verdict = Verdict.SAFE
                 result.details.append("No issues found")
             elif "unsafe" in output or "critical" in output:
                 result.verdict = Verdict.MALICIOUS
                 result.details.append(proc.stdout[:500])
             else:
                 result.verdict = Verdict.SUSPICIOUS
-                result.details.append(f"Non-JSON output: {proc.stdout[:300]}")
-
+                result.details.append(f"Parse error: {proc.stdout[:200]}")
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
     except Exception as e:
         result.verdict = Verdict.ERROR
         result.error = str(e)
-
     return result
 
 
@@ -199,19 +299,16 @@ def run_picklescan(path: Path, verbose: bool) -> ScannerResult:
             result.verdict = Verdict.SUSPICIOUS
             result.details.append("Suspicious imports detected")
         elif proc.returncode == 0:
-            result.verdict = Verdict.SAFE
             result.details.append("No dangerous imports found (denylist-based)")
         else:
             result.verdict = Verdict.ERROR
             result.error = proc.stderr[:500]
-
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
     except Exception as e:
         result.verdict = Verdict.ERROR
         result.error = str(e)
-
     return result
 
 
@@ -228,7 +325,6 @@ def run_modelaudit(path: Path, verbose: bool) -> ScannerResult:
             data = json.loads(proc.stdout)
             findings = data.get("findings", data.get("results", []))
             if not findings:
-                result.verdict = Verdict.SAFE
                 result.details.append("No findings")
             else:
                 severities = [f.get("severity", "").upper() for f in findings if isinstance(f, dict)]
@@ -238,37 +334,43 @@ def run_modelaudit(path: Path, verbose: bool) -> ScannerResult:
                     result.verdict = Verdict.SUSPICIOUS
                 else:
                     result.verdict = Verdict.SUSPICIOUS
-
                 for finding in findings[:10]:
                     if isinstance(finding, dict):
                         msg = finding.get("message", finding.get("rule", "Unknown"))
-                        sev = finding.get("severity", "unknown")
+                        sev = finding.get("severity", "?")
                         result.details.append(f"[{sev}] {msg}")
         except json.JSONDecodeError:
             if proc.returncode == 0:
-                result.verdict = Verdict.SAFE
                 result.details.append("No issues detected")
             else:
                 result.verdict = Verdict.SUSPICIOUS
-                result.details.append(f"Non-JSON output: {proc.stdout[:300]}")
-
+                result.details.append(f"Parse error: {proc.stdout[:200]}")
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
     except Exception as e:
         result.verdict = Verdict.ERROR
         result.error = str(e)
-
     return result
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+SCANNER_RUNNERS = {
+    "fickling": run_fickling,
+    "modelscan": run_modelscan,
+    "picklescan": run_picklescan,
+    "modelaudit": run_modelaudit,
+}
 
 
 def aggregate_verdict(results: list[ScannerResult]) -> Verdict:
     active = [r for r in results if r.available and r.verdict != Verdict.ERROR]
     if not active:
         return Verdict.ERROR
-
     verdicts = [r.verdict for r in active]
-
     if Verdict.MALICIOUS in verdicts:
         return Verdict.MALICIOUS
     if Verdict.SUSPICIOUS in verdicts:
@@ -278,74 +380,112 @@ def aggregate_verdict(results: list[ScannerResult]) -> Verdict:
     return Verdict.SAFE
 
 
+def scan_file(path: Path, available: dict[str, bool], verbose: bool) -> tuple[list[ScannerResult], Verdict]:
+    ext = path.suffix.lower()
+
+    # Non-executable formats: skip pickle scanners, only run ModelAudit for config checks
+    if ext in SAFE_EXTENSIONS:
+        results = []
+        for name in SCANNER_RUNNERS:
+            if name == "modelaudit" and available.get(name):
+                results.append(run_modelaudit(path, verbose))
+            else:
+                r = ScannerResult(scanner=name, available=available.get(name, False), verdict=Verdict.FORMAT_SAFE)
+                r.details.append(f"Non-executable format ({ext})")
+                results.append(r)
+        return results, aggregate_verdict(results)
+
+    # Run all available scanners
+    results = []
+    for name, runner in SCANNER_RUNNERS.items():
+        if available.get(name):
+            if verbose:
+                print(f"  Running {name}...")
+            results.append(runner(path, verbose))
+        else:
+            results.append(ScannerResult(scanner=name, available=False, verdict=Verdict.ERROR))
+
+    return results, aggregate_verdict(results)
+
+
+def find_model_files(directory: Path) -> list[Path]:
+    files = []
+    for f in directory.rglob("*"):
+        if f.is_file() and f.suffix.lower() in SCANNABLE_EXTENSIONS:
+            # Skip tokenizer/vocab files
+            if any(fnmatch.fnmatch(f.name, p) for p in HF_SKIP_PATTERNS):
+                continue
+            files.append(f)
+    return sorted(files)
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
 def format_report(path: Path, results: list[ScannerResult], overall: Verdict) -> str:
     lines = []
     lines.append(f"# Model Security Scan Report")
     lines.append(f"")
-    lines.append(f"**File:** `{path}`")
+    lines.append(f"**File:** `{path.name}`")
+    lines.append(f"**Path:** `{path}`")
     lines.append(f"**Size:** {path.stat().st_size:,} bytes")
     lines.append(f"**Extension:** `{path.suffix}`")
     lines.append(f"")
 
-    verdict_symbols = {
+    verdict_display = {
         Verdict.SAFE: "SAFE",
         Verdict.FORMAT_SAFE: "FORMAT_SAFE (non-executable format)",
         Verdict.SUSPICIOUS: "SUSPICIOUS",
         Verdict.MALICIOUS: "MALICIOUS",
         Verdict.ERROR: "ERROR",
     }
-    lines.append(f"## Overall Verdict: {verdict_symbols.get(overall, str(overall))}")
-    lines.append(f"")
 
+    lines.append(f"## Overall Verdict: {verdict_display.get(overall, str(overall))}")
+    lines.append(f"")
     lines.append(f"## Scanner Results")
     lines.append(f"")
 
     for r in results:
         if not r.available:
-            lines.append(f"### {r.scanner} (not installed)")
+            lines.append(f"### {r.scanner}: skipped (not installed)")
             lines.append(f"")
             continue
 
-        status = verdict_symbols.get(r.verdict, str(r.verdict))
-        lines.append(f"### {r.scanner}: {status}")
-        if r.details:
-            for d in r.details:
-                lines.append(f"- {d}")
+        lines.append(f"### {r.scanner}: {verdict_display.get(r.verdict, str(r.verdict))}")
+        for d in r.details:
+            lines.append(f"- {d}")
         if r.error:
             lines.append(f"- Error: {r.error}")
         lines.append(f"")
 
     lines.append(f"## Recommendations")
     lines.append(f"")
-
     if overall == Verdict.MALICIOUS:
         lines.append(f"- DO NOT load this model. Malicious code detected.")
-        lines.append(f"- Delete the file or quarantine it for further analysis.")
-        lines.append(f"- If downloaded from HuggingFace, report it via their security contact.")
+        lines.append(f"- Delete or quarantine the file.")
+        lines.append(f"- If from HuggingFace, report via their security contact.")
     elif overall == Verdict.SUSPICIOUS:
-        lines.append(f"- Exercise caution. Some scanners flagged concerns.")
-        lines.append(f"- Review the flagged imports manually before loading.")
-        lines.append(f"- Consider running dynamic analysis (Dyana) in a sandbox.")
-        lines.append(f"- If possible, find a SafeTensors version of this model.")
+        lines.append(f"- Review flagged imports manually before loading.")
+        lines.append(f"- Consider dynamic analysis in a sandbox (Dyana).")
+        lines.append(f"- Look for a SafeTensors version of this model.")
     elif overall == Verdict.FORMAT_SAFE:
-        lines.append(f"- Model uses a non-executable format. Weight data cannot contain code.")
-        lines.append(f"- Check if the model repo uses `trust_remote_code=True` or `auto_map` in config.json.")
-        lines.append(f"- If so, the Python code loaded alongside weights is NOT covered by this scan.")
+        lines.append(f"- Weight data uses a non-executable format.")
+        lines.append(f"- Check config.json for `trust_remote_code` or `auto_map` (unscanned Python code).")
     else:
-        lines.append(f"- No issues detected by any scanner.")
-        lines.append(f"- Note: static scanners have known bypass techniques (133+ documented).")
-        lines.append(f"- For high-value deployments, also run dynamic analysis in a sandbox.")
+        lines.append(f"- No issues detected. Static scanners have known bypass techniques (133+).")
+        lines.append(f"- For high-value deployments, also run dynamic sandbox analysis.")
 
     lines.append(f"")
     lines.append(f"---")
-    lines.append(f"*Scanned by raxIT model-scanner (Fickling + ModelScan + PickleScan + ModelAudit)*")
-
+    lines.append(f"*Scanned by raxIT model-scanner | github.com/raxITlabs/skills*")
     return "\n".join(lines)
 
 
-def format_json_report(path: Path, results: list[ScannerResult], overall: Verdict) -> str:
-    return json.dumps({
+def format_json(path: Path, results: list[ScannerResult], overall: Verdict) -> dict:
+    return {
         "file": str(path),
+        "filename": path.name,
         "size_bytes": path.stat().st_size,
         "extension": path.suffix,
         "overall_verdict": overall.value,
@@ -359,128 +499,103 @@ def format_json_report(path: Path, results: list[ScannerResult], overall: Verdic
             }
             for r in results
         ],
-    }, indent=2)
-
-
-def scan_file(path: Path, available: dict[str, bool], verbose: bool) -> tuple[list[ScannerResult], Verdict]:
-    ext = path.suffix.lower()
-
-    if ext in SAFE_EXTENSIONS:
-        results = []
-        for name, is_available in available.items():
-            if name == "modelaudit" and is_available:
-                results.append(run_modelaudit(path, verbose))
-            else:
-                r = ScannerResult(scanner=name, available=is_available, verdict=Verdict.FORMAT_SAFE)
-                r.details.append(f"Non-executable format ({ext}), skipping")
-                results.append(r)
-        return results, aggregate_verdict(results)
-
-    scanners = {
-        "fickling": run_fickling,
-        "modelscan": run_modelscan,
-        "picklescan": run_picklescan,
-        "modelaudit": run_modelaudit,
     }
 
-    results = []
-    for name, run_fn in scanners.items():
-        if available.get(name):
-            if verbose:
-                print(f"Running {name}...")
-            results.append(run_fn(path, verbose))
-        else:
-            results.append(ScannerResult(scanner=name, available=False, verdict=Verdict.ERROR))
 
-    return results, aggregate_verdict(results)
-
-
-def find_model_files(directory: Path) -> list[Path]:
-    files = []
-    for f in directory.rglob("*"):
-        if f.is_file() and f.suffix.lower() in SCANNABLE_EXTENSIONS:
-            files.append(f)
-    return sorted(files)
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-scanner ML model security analysis")
-    parser.add_argument("path", help="Path to model file or directory")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
-    parser.add_argument("--install", action="store_true", help="Install missing scanners")
+    parser = argparse.ArgumentParser(
+        description="Scan ML model files for malicious code. Zero-config.",
+        epilog="Accepts local files, directories, or HuggingFace model IDs (e.g., microsoft/phi-2)",
+    )
+    parser.add_argument("path", help="File, directory, or HuggingFace model ID")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--json", action="store_true", help="JSON output")
     args = parser.parse_args()
 
-    path = Path(args.path)
-    if not path.exists():
-        print(f"Error: {path} does not exist", file=sys.stderr)
+    quiet = args.json
+
+    # Auto-install scanners
+    available = detect_scanners()
+    installed = sum(available.values())
+    if installed < len(available):
+        available = auto_install(available, quiet=quiet)
+        installed = sum(available.values())
+
+    if installed == 0:
+        print("No scanners could be installed. Check pip/npm are available.", file=sys.stderr)
         sys.exit(1)
 
-    available = detect_available_scanners()
-    installed_count = sum(available.values())
-
-    if installed_count == 0:
-        print("No scanners installed.", file=sys.stderr)
-        if args.install:
-            install_scanners()
-            available = detect_available_scanners()
-            installed_count = sum(available.values())
-            if installed_count == 0:
-                print("Installation failed. Install manually:", file=sys.stderr)
-                print("  pip install fickling modelscan picklescan", file=sys.stderr)
-                print("  npm install -g promptfoo", file=sys.stderr)
-                sys.exit(1)
-        else:
-            print("Run with --install to auto-install, or install manually:", file=sys.stderr)
-            print("  pip install fickling modelscan picklescan", file=sys.stderr)
-            print("  npm install -g promptfoo", file=sys.stderr)
-            sys.exit(1)
-
-    if not args.json:
-        print(f"Available scanners: {', '.join(k for k, v in available.items() if v)} ({installed_count}/4)")
+    if not quiet:
+        names = [k for k, v in available.items() if v]
         missing = [k for k, v in available.items() if not v]
+        print(f"Scanners: {', '.join(names)} ({installed}/4)")
         if missing:
-            print(f"Not installed: {', '.join(missing)}")
+            print(f"Unavailable: {', '.join(missing)}")
         print()
 
-    if path.is_dir():
-        files = find_model_files(path)
-        if not files:
-            print(f"No model files found in {path}", file=sys.stderr)
-            sys.exit(1)
-        if not args.json:
-            print(f"Found {len(files)} model file(s) in {path}\n")
+    # Resolve input: HuggingFace model ID or local path
+    if is_hf_model_id(args.path):
+        if not quiet:
+            print(f"HuggingFace model: {args.path}")
+        target = download_hf_model(args.path, quiet=quiet)
+        files = find_model_files(target)
     else:
-        files = [path]
+        target = Path(args.path)
+        if not target.exists():
+            print(f"Error: {target} does not exist", file=sys.stderr)
+            sys.exit(1)
+        files = find_model_files(target) if target.is_dir() else [target]
 
-    all_reports = []
+    if not files:
+        print(f"No scannable model files found.", file=sys.stderr)
+        sys.exit(1)
+
+    if not quiet:
+        print(f"Scanning {len(files)} file(s)...\n")
+
+    # Scan all files
+    all_results = []
+    worst = Verdict.SAFE
+    verdict_priority = {Verdict.SAFE: 0, Verdict.FORMAT_SAFE: 1, Verdict.SUSPICIOUS: 2, Verdict.MALICIOUS: 3}
+
     for f in files:
-        if not args.json:
-            print(f"Scanning: {f}")
-            print("-" * 60)
+        if not quiet:
+            print(f"--- {f.name} ---")
 
         results, overall = scan_file(f, available, args.verbose)
+        all_results.append(format_json(f, results, overall))
 
-        if args.json:
-            all_reports.append(json.loads(format_json_report(f, results, overall)))
-        else:
+        if not quiet:
             print(format_report(f, results, overall))
             print()
 
-    if args.json:
-        if len(all_reports) == 1:
-            print(json.dumps(all_reports[0], indent=2))
-        else:
-            print(json.dumps(all_reports, indent=2))
+        if verdict_priority.get(overall, -1) > verdict_priority.get(worst, -1):
+            worst = overall
 
-    worst = Verdict.SAFE
-    for f in files:
-        results, overall = scan_file(f, available, False)
-        if overall == Verdict.MALICIOUS:
-            worst = Verdict.MALICIOUS
-            break
-        elif overall == Verdict.SUSPICIOUS and worst != Verdict.MALICIOUS:
-            worst = Verdict.SUSPICIOUS
+    # JSON output
+    if args.json:
+        output = all_results[0] if len(all_results) == 1 else {
+            "model": args.path,
+            "overall_verdict": worst.value,
+            "files_scanned": len(all_results),
+            "results": all_results,
+        }
+        print(json.dumps(output, indent=2))
+
+    # Summary for multi-file scans
+    if not quiet and len(files) > 1:
+        print("=" * 60)
+        print(f"Overall: {worst.value}")
+        verdicts = {}
+        for r in all_results:
+            v = r["overall_verdict"]
+            verdicts[v] = verdicts.get(v, 0) + 1
+        for v, count in sorted(verdicts.items()):
+            print(f"  {v}: {count} file(s)")
 
     sys.exit(0 if worst in (Verdict.SAFE, Verdict.FORMAT_SAFE) else 1)
 
