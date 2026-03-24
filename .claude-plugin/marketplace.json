@@ -1,0 +1,22 @@
+{
+  "name": "raxit-ai-security-skills",
+  "owner": {
+    "name": "raxIT",
+    "email": "hello@raxit.ai"
+  },
+  "metadata": {
+    "description": "AI security skills by raxIT — model scanning, supply chain security, and more",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "ai-security-skills",
+      "description": "AI security tools including ML model scanning with multi-scanner aggregation for detecting malicious code in pickle, safetensors, and other model formats",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/model-scanner"
+      ]
+    }
+  ]
+}
