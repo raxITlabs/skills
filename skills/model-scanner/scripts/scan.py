@@ -309,8 +309,9 @@ def run_modelscan(path: Path, verbose: bool) -> ScannerResult:
                 result.verdict = Verdict.MALICIOUS
                 result.details.append(proc.stdout[:500])
             else:
-                result.verdict = Verdict.SUSPICIOUS
-                result.details.append(f"Parse error: {proc.stdout[:200]}")
+                # Can't parse = scanner error, not a security finding
+                result.verdict = Verdict.ERROR
+                result.error = f"ModelScan returned non-JSON output (exit {proc.returncode})"
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
@@ -400,8 +401,9 @@ def run_modelaudit(path: Path, verbose: bool) -> ScannerResult:
             if proc.returncode == 0:
                 result.details.append("No issues detected")
             else:
-                result.verdict = Verdict.SUSPICIOUS
-                result.details.append(f"Parse error: {proc.stdout[:200]}")
+                # Can't parse output = scanner error, NOT a security finding
+                result.verdict = Verdict.ERROR
+                result.error = f"ModelAudit returned non-JSON output (exit {proc.returncode})"
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
