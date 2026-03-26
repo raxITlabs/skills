@@ -275,6 +275,19 @@ def run_fickling(path: Path, verbose: bool) -> ScannerResult:
     return result
 
 
+def _extract_json(text: str) -> dict | None:
+    """Extract JSON object from text that may have non-JSON prefix/suffix."""
+    # Find the first { and last } to extract JSON
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 def run_modelscan(path: Path, verbose: bool) -> ScannerResult:
     result = ScannerResult(scanner="modelscan", available=True, verdict=Verdict.SAFE)
     try:
@@ -284,12 +297,19 @@ def run_modelscan(path: Path, verbose: bool) -> ScannerResult:
         )
         result.raw_output = proc.stdout + proc.stderr
 
-        try:
-            data = json.loads(proc.stdout)
+        # ModelScan often prepends non-JSON text (settings warnings, scanner errors)
+        # before the actual JSON output. Extract the JSON from wherever it appears.
+        data = _extract_json(proc.stdout)
+
+        if data is not None:
             issues = data.get("issues", [])
-            if not issues:
+            # Also check summary for zero counts
+            summary = data.get("summary", {}).get("total_issues_by_severity", {})
+            total_issues = sum(summary.get(k, 0) for k in ("LOW", "MEDIUM", "HIGH", "CRITICAL"))
+
+            if not issues and total_issues == 0:
                 result.details.append("No issues found")
-            else:
+            elif issues:
                 severities = [i.get("severity", "").upper() for i in issues]
                 if "CRITICAL" in severities or "HIGH" in severities:
                     result.verdict = Verdict.MALICIOUS
@@ -301,17 +321,12 @@ def run_modelscan(path: Path, verbose: bool) -> ScannerResult:
                     desc = issue.get("description", issue.get("operator", "Unknown"))
                     sev = issue.get("severity", "?")
                     result.details.append(f"[{sev}] {desc}")
-        except json.JSONDecodeError:
-            output = result.raw_output.lower()
-            if "no issues" in output or proc.returncode == 0:
-                result.details.append("No issues found")
-            elif "unsafe" in output or "critical" in output:
-                result.verdict = Verdict.MALICIOUS
-                result.details.append(proc.stdout[:500])
             else:
-                # Can't parse = scanner error, not a security finding
-                result.verdict = Verdict.ERROR
-                result.error = f"ModelScan returned non-JSON output (exit {proc.returncode})"
+                result.details.append("No issues found")
+        else:
+            # Truly unparseable output
+            result.verdict = Verdict.ERROR
+            result.error = f"ModelScan returned unparseable output (exit {proc.returncode})"
     except subprocess.TimeoutExpired:
         result.verdict = Verdict.ERROR
         result.error = "Timed out after 120s"
