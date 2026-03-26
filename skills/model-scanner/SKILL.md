@@ -1,6 +1,6 @@
 ---
 name: model-scanner
-description: ML supply chain security scanner. Scans model files, scores risk (0-100), maps to 5 global compliance frameworks (ISM-2072, EU AI Act, OWASP LLM, MITRE ATLAS, NIST AI RMF), and provides remediation steps. Zero-config, auto-installs scanners. Use when the user asks to scan a model, check if a model is safe, audit ML security posture, check compliance, inspect pickle/safetensors/pytorch files, or mentions model supply chain security. Also trigger on ISM-2072, EU AI Act, OWASP LLM06, model risk score, "is this model safe", "scan my models", "check compliance".
+description: ML supply chain security scanner. Scans model files, scores risk (0-100), maps to 5 global compliance frameworks (ISM-2072, EU AI Act, OWASP LLM, MITRE ATLAS, NIST AI RMF), and provides remediation steps. Zero-config, auto-installs scanners. Use when the user asks to scan a model, check if a model is safe, audit ML security posture, check compliance, inspect pickle/safetensors/pytorch files, or mentions model supply chain security. Also trigger on ISM-2072, EU AI Act, OWASP LLM06, model risk score, "is this model safe", "scan my models", "assess my models", "check my models", "audit my models", "check compliance".
 ---
 
 # Model Scanner — ML Supply Chain Security
