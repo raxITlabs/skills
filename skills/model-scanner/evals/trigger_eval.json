@@ -1,0 +1,82 @@
+[
+  {
+    "query": "we just downloaded a bunch of models from huggingface for our new RAG pipeline. before we deploy to prod can you check if any of them have security issues? they're in the models/ directory",
+    "should_trigger": true
+  },
+  {
+    "query": "i found a .pkl file in our ML pipeline that one of the data scientists added last week. can you tell me if it's safe to load?",
+    "should_trigger": true
+  },
+  {
+    "query": "we're going through an IRAP assessment and the assessor asked about ISM-2072 compliance for our AI models. can you check our models directory and tell me where we stand?",
+    "should_trigger": true
+  },
+  {
+    "query": "assess my models for security risks. i want to know the risk score and which compliance frameworks we're failing",
+    "should_trigger": true
+  },
+  {
+    "query": "our CISO wants a report on whether our ML model files comply with EU AI Act article 15. we have models in ./trained_models/ and some downloaded from huggingface",
+    "should_trigger": true
+  },
+  {
+    "query": "i just cloned deepseek-ai/deepseek-coder-1.3b-base locally and want to make sure its safe before i load it. its got trust_remote_code in the config and im a bit worried",
+    "should_trigger": true
+  },
+  {
+    "query": "can you audit the machine learning models in this project? i need to know which ones use pickle format and which use safetensors, and what the security implications are",
+    "should_trigger": true
+  },
+  {
+    "query": "hey we have some pytorch .pt files and sklearn .pkl files scattered around the repo. some might have been downloaded from dodgy sources. can you scan them all and tell me whats risky?",
+    "should_trigger": true
+  },
+  {
+    "query": "is microsoft/phi-2 safe to use? i want to check if the model files have any known vulnerabilities or if huggingface has flagged it",
+    "should_trigger": true
+  },
+  {
+    "query": "check if our model pipeline has any OWASP LLM06 supply chain vulnerabilities. we use models from huggingface and some custom trained ones saved as pickle",
+    "should_trigger": true
+  },
+  {
+    "query": "i need to train a sentiment analysis model using pytorch. can you help me write the training loop and set up the data pipeline?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do i convert my pytorch model to ONNX format? i want to deploy it on edge devices",
+    "should_trigger": false
+  },
+  {
+    "query": "can you help me fine-tune llama-2 on my custom dataset? i have the data in a CSV file",
+    "should_trigger": false
+  },
+  {
+    "query": "write a python script that loads a pickle file and prints its contents. the file is at data/config.pkl and it has some hyperparameters i need",
+    "should_trigger": false
+  },
+  {
+    "query": "i need to set up a CI/CD pipeline for our ML project. we use github actions and want to run tests on every PR",
+    "should_trigger": false
+  },
+  {
+    "query": "can you review the security of our REST API? we have flask endpoints that serve model predictions and i want to check for SQL injection and XSS",
+    "should_trigger": false
+  },
+  {
+    "query": "help me understand the NIST AI RMF framework. what are the core functions and how do they map to our existing security controls?",
+    "should_trigger": false
+  },
+  {
+    "query": "our docker image for the ML service is getting too large because of the model files. can you help me optimize the dockerfile and use multi-stage builds?",
+    "should_trigger": false
+  },
+  {
+    "query": "i want to benchmark different model architectures for our NLP task. can you help me set up experiments comparing BERT, RoBERTa, and DistilBERT?",
+    "should_trigger": false
+  },
+  {
+    "query": "can you help me write unit tests for our model inference code? the predict function is in src/inference.py and takes a text string as input",
+    "should_trigger": false
+  }
+]
